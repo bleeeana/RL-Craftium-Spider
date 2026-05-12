@@ -21,7 +21,7 @@ class CNNEncoder(nn.Module):
         for m in self.modules():
             if isinstance(m, (Conv2d, nn.Linear)):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
-                if m.bias:
+                if m.bias is not None:
                     nn.init.zeros_(m.bias)
         
     def forward(self, frames):
