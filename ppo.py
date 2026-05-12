@@ -9,6 +9,7 @@ class Memory:
     def __init__(self,size: int, state_shape: tuple = (4,64,64,3)):
         self.clear()
         self.idx = 0
+        self.size = size
         self.states = np.zeros((size, *state_shape), dtype=np.uint8)
         self.actions = np.zeros(size, dtype=np.int64)
         self.rewards = np.zeros(size, dtype=np.float32)
@@ -17,21 +18,16 @@ class Memory:
         self.values = np.zeros(size, dtype=np.float32)
     
     def append_new(self, state, action,reward, value,log_prob, done):
-        self.states.append(state)
-        self.actions.append(action)
-        self.rewards.append(reward)
-        self.log_probs.append(log_prob)
-        self.dones.append(done)
-        self.values.append(value)
-        
+        self.states[self.idx] =state
+        self.actions[self.idx] = action
+        self.rewards[self.idx] = reward
+        self.log_probs[self.idx] = log_prob
+        self.dones[self.idx] = done
+        self.values[self.idx] = value
+        self.idx += 1
 
     def clear(self):
-        self.states = []
-        self.actions = []
-        self.rewards = []
-        self.values = []
-        self.log_probs = []
-        self.dones = []
+        self.idx = 0
         
     def compute_returns(self, gamma: float):
         returns = []
@@ -44,9 +40,27 @@ class Memory:
         return returns
     
     def compute_gae(self, gamma: float, gae_lambda: float):
-        rewards = np.array(self.rewards, dtype=np.float32)
-        dones   = np.array(self.dones, dtype=np.float32)
-        values  = np.array(self.values, dtype=np.float32)
+        last_gae = 0.0
+        advantages = np.zeros(self.size, dtype=np.float32)
+        for t in reversed(range(len(self.rewards))):
+            if t == len(self.rewards) - 1 or self.dones[t]:
+                next_value = 0.0
+                next_non_terminal = 1.0 - self.dones[t]
+            else:
+                next_value = self.values[t + 1]
+                next_non_terminal = 1.0
+                
+            # TD-ошибка: r_t + gamma*V(s_t+1)*(1-done) - V(s_t)
+            delta = self.rewards[t] + gamma * next_value * next_non_terminal - self.values[t]
+            
+            # GAE: A_t = TD + gamma*gae_lambda*(1-done)*A_{t+1}
+            last_gae = delta + gamma * gae_lambda * next_non_terminal * last_gae
+            advantages[t] = last_gae
+            
+        returns = advantages + self.values
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        return advantages, returns
         
     
     def compute_advantage(self,returns, values):
@@ -74,7 +88,7 @@ class PPOAgent:
         self.actor = Actor(feature_size, hidden_size, action_size, layers_num)
         self.actor.to(self.actor.device)
         self.encoder = CNNEncoder(feature_size, channels_size, frame_size).to(self.actor.device)
-        self.critic = Critic(feature_size, hidden_size, action_size, layers_num).to(self.actor.device)
+        self.critic = Critic(feature_size, hidden_size, 1, layers_num).to(self.actor.device)
         all_params = list(self.encoder.parameters()) + list(self.actor.parameters()) + list(self.critic.parameters())
         self.optimizer = torch.optim.Adam(all_params, lr=lr)
         
@@ -89,7 +103,7 @@ class PPOAgent:
     def ppo_loss(self, states_tensor, actions_tensor, advantages_tensor, returns_tensor, old_log_probs_tensor):
         features = self.encoder(states_tensor)
         logits = self.actor(features)
-        distribution = torch.distributions.Categorical(logits)
+        distribution = torch.distributions.Categorical(logits=logits)
         log_probs = distribution.log_prob(actions_tensor)
         entropy = distribution.entropy().mean()
         
@@ -103,6 +117,11 @@ class PPOAgent:
             
     def act(self, state):
         with torch.no_grad():
+            if not isinstance(state, torch.Tensor):
+                state = torch.as_tensor(np.asarray(state), dtype=torch.float32).to(self.actor.device)
+            if state.dim() == 4:
+                state = state.unsqueeze(0)
+            
             features = self.encoder(state)
             log_probs, action = self.actor.action_probs(features)
             value = self.critic(features).item()
@@ -117,11 +136,11 @@ class PPOAgent:
             
             advantages, returns = self.memory.compute_gae(self.gamma, self.gae_lambda)
             
-            states_tensor = torch.FloatTensor(np.array(self.memory.states)).to(self.actor.device)
-            actions_tensor = torch.FloatTensor(np.array(self.memory.actions)).unsqueeze(-1).to(self.actor.device)
-            advantages_tensor = torch.FloatTensor(np.array(advantages)).to(self.actor.device)
-            returns_tensor = torch.FloatTensor(np.array(returns)).to(self.actor.device)
-            old_log_probs_tensor = torch.FloatTensor(np.array(self.memory.log_probs)).to(self.actor.device)
+            states_tensor = torch.from_numpy(self.memory.states).float().to(self.actor.device)
+            actions_tensor = torch.from_numpy(self.memory.actions).to(self.actor.device)
+            advantages_tensor = torch.from_numpy(advantages).float().to(self.actor.device)
+            returns_tensor = torch.from_numpy(returns).float().to(self.actor.device)
+            old_log_probs_tensor = torch.from_numpy(self.memory.log_probs).float().to(self.actor.device)
             for _ in range(self.ppo_epochs):
                 idx = np.random.permutation(len(states_tensor))
                 for start in range(0,len(states_tensor), self.batch_size):

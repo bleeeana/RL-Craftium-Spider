@@ -1,1 +1,5 @@
-/__pycache__
+__pycache__/
+luanti-run-
+luanti-run-*/
+runs/
+spider-*

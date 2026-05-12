@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Conv2d
+import numpy as np
 
 class CNNEncoder(nn.Module):
     def __init__(self, output_size: int, channels_size: int, frame_size: int):
@@ -25,6 +26,7 @@ class CNNEncoder(nn.Module):
                     nn.init.zeros_(m.bias)
         
     def forward(self, frames):
+        
         frames = frames.permute(0,4,1,2,3).reshape(frames.shape[0], -1, 64, 64)
         frames /=255.0
         for layer in self.layers:
@@ -55,13 +57,9 @@ class Actor(nn.Module):
         state = self.layers[-1](state)
         return state
         
-    def action_probs(self, state: list):
+    def action_probs(self, state: torch.Tensor):
         with torch.no_grad():
-            if state.dim() == 4:
-                #(1, 4, 64, 64, 3)
-                state = state.unsqueeze(0)
-            state_tensor = torch.FloatTensor(state).to(self.device)
-            logits = self.forward(state_tensor)
+            logits = self.forward(state)
             probs = F.softmax(logits, dim=-1)
             distribution = torch.distributions.Categorical(probs)
             action = distribution.sample()
@@ -85,6 +83,6 @@ class Critic(nn.Module):
                 
     def forward(self, state: torch.Tensor):
         for layer in self.layers[:-1]:
-            value = self.activation(layer(state))
+            state = self.activation(layer(state))
         value = self.layers[-1](state).squeeze(-1)
         return value
