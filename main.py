@@ -9,6 +9,7 @@ from datetime import datetime
 from ppo import PPOAgent
 import torch
 import random
+from reward import ChangeRewardWrapper
 
 SEED = 42
 torch.manual_seed(SEED)
@@ -16,32 +17,36 @@ np.random.seed(SEED)
 random.seed(SEED)
 
 class Solver:
-    def __init__(self, env_name:str = "Craftium/SpidersAttack-v0", episodes: int = 2000):
+    def __init__(self, env_name:str = "Craftium/SpidersAttack-v0", episodes: int = 4000):
         self.scores = []
         
         self.env_name = env_name
         self.episodes = episodes
-        self.agent = PPOAgent(action_size=10)
+        self.agent = PPOAgent(action_size=10, layers_num=2)
         self.episode_rewards = []
     
-    def run(self, save_best : bool = False, writer: SummaryWriter = None):
+    def run(self, save_best : bool = False, writer: SummaryWriter = None) -> None:
         env = gym.make(self.env_name, render_mode="rgb_array")
+        env = ChangeRewardWrapper(env)
         env = gym.wrappers.FrameStack(env, num_stack=4)
         best_score = 0
         for ep in range(self.episodes):
             state, _ = env.reset()
-            #print(state.shape)
             episode_reward = 0
+            episode_raw_reward = 0
             while True:
                 value, action, log_prob = self.agent.act(state)
-                next_state, reward, terminated, truncated, _ = env.step(action)
-                episode_reward += reward
+                next_state, new_reward, terminated, truncated, info = env.step(action)
+                raw_reward = info["raw_reward"]
+                episode_raw_reward += raw_reward
+                episode_reward += new_reward
                 done = terminated or truncated
-                self.agent.train(state,reward, value, log_prob, done, action, writer)
+                self.agent.train(state,new_reward, value, log_prob, done, action, writer, ep)
                 state = next_state
                 if done:
                     if writer:
                         writer.add_scalar("Metrics/Episode Reward", episode_reward, ep)
+                        writer.add_scalar("Metrics/Episode Raw Reward", episode_raw_reward, ep)
                     self.episode_rewards.append(episode_reward)
                     avg = np.mean(self.episode_rewards[-50:]) if len(self.episode_rewards) >=50 else np.mean(self.episode_rewards)
                     if ep % 50 == 0:
@@ -54,15 +59,11 @@ class Solver:
         env.close()
          
         
-    def test(self, episodes=10, render: bool = True, record: bool = False, video_folder: str = None):
+    def test(self, episodes: int=10, render: bool = True, record: bool = False, video_folder: str = None) -> None:
         pass
-    
-    def run_experiments(self, episodes=1000):
-        pass
-        
     
 def main():
-    exp_name = f"ppo__steps={2000}_ppoepochs={3}_updateperiod={2048}"
+    exp_name = f"ppo__steps={4000}_ppoepochs={4}_updateperiod={8192}"
     writer = SummaryWriter(log_dir=f"runs/{datetime.now().strftime('%Y%m%d_%H%M%S')}/{exp_name}")
     solver = Solver()
     solver.run(True, writer)

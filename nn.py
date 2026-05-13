@@ -25,7 +25,7 @@ class CNNEncoder(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
         
-    def forward(self, frames):
+    def forward(self, frames) -> torch.Tensor:
         
         frames = frames.permute(0,4,1,2,3).reshape(frames.shape[0], -1, 64, 64)
         frames /=255.0
@@ -51,13 +51,13 @@ class Actor(nn.Module):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
                 nn.init.zeros_(m.bias)
                 
-    def forward(self, state: torch.Tensor):
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
         for layer in self.layers[:-1]:
             state = self.activation(layer(state))
         state = self.layers[-1](state)
         return state
         
-    def action_probs(self, state: torch.Tensor):
+    def action_probs(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.no_grad():
             logits = self.forward(state)
             probs = F.softmax(logits, dim=-1)
@@ -81,7 +81,7 @@ class Critic(nn.Module):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
                 nn.init.zeros_(m.bias)
                 
-    def forward(self, state: torch.Tensor):
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
         for layer in self.layers[:-1]:
             state = self.activation(layer(state))
         value = self.layers[-1](state).squeeze(-1)

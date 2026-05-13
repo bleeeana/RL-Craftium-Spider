@@ -4,9 +4,10 @@ from collections import deque
 import random
 from nn import Actor, Critic, CNNEncoder
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 
 class Memory:
-    def __init__(self,size: int, state_shape: tuple = (4,64,64,3)):
+    def __init__(self,size: int, state_shape: tuple[int,int,int,int] = (4,64,64,3)):
         self.clear()
         self.idx = 0
         self.size = size
@@ -17,7 +18,8 @@ class Memory:
         self.log_probs = np.zeros(size, dtype=np.float32)
         self.values = np.zeros(size, dtype=np.float32)
     
-    def append_new(self, state, action,reward, value,log_prob, done):
+    def append_new(self, state: np.ndarray | torch.Tensor, action: int, reward: float, 
+                   value: float, log_prob: float, done: bool) -> None:
         self.states[self.idx] =state
         self.actions[self.idx] = action
         self.rewards[self.idx] = reward
@@ -26,10 +28,10 @@ class Memory:
         self.values[self.idx] = value
         self.idx += 1
 
-    def clear(self):
+    def clear(self) -> None:
         self.idx = 0
         
-    def compute_returns(self, gamma: float):
+    def compute_returns(self, gamma: float) -> list[float]:
         returns = []
         reward = 0
         for r, done in zip(reversed(self.rewards), reversed(self.dones)):
@@ -39,7 +41,7 @@ class Memory:
             returns.insert(0, reward)
         return returns
     
-    def compute_gae(self, gamma: float, gae_lambda: float):
+    def compute_gae(self, gamma: float, gae_lambda: float) -> tuple[np.ndarray, np.ndarray]:
         last_gae = 0.0
         advantages = np.zeros(self.size, dtype=np.float32)
         for t in reversed(range(len(self.rewards))):
@@ -63,20 +65,20 @@ class Memory:
         return advantages, returns
         
     
-    def compute_advantage(self,returns, values):
+    def compute_advantage(self, returns: np.ndarray | list[float], values: np.ndarray | list[float]) -> np.ndarray:
         return np.array(returns) - np.array(values)
     
-    def compute_normalized_advantage(self, returns, values):
+    def compute_normalized_advantage(self, returns: np.ndarray, values: np.ndarray) -> np.ndarray:
         advantage = self.compute_advantage(returns, values)
         return (advantage - advantage.mean()) / (advantage.std() + 1e-8)
     
 class PPOAgent:
-    def __init__(self, action_size: int, lr: float = 3e-4,
-                 gamma: float = 0.99, clip_ratio: float = 0.2, ppo_epochs: int = 3,
+    def __init__(self, action_size: int, lr: float = 5e-4,
+                 gamma: float = 0.99, clip_ratio: float = 0.2, ppo_epochs: int = 4,
                  hidden_size: int = 512, layers_num: int = 0, normalize: bool = False,
-                 critic_loss_coeff: float = 0.3, update_period:int = 2048, frame_size: int = 4,
+                 critic_loss_coeff: float = 0.3, update_period: int = 8192, frame_size: int = 4,
                  feature_size: int = 256, channels_size: int = 3, batch_size: int = 256, 
-                 gae_lambda: int = 0.95):
+                 gae_lambda: float = 0.95, entropy_loss_coeff = 0.02):
         self.gamma = gamma
         self.batch_size = batch_size
         self.gae_lambda = gae_lambda
@@ -97,15 +99,19 @@ class PPOAgent:
         self.steps = 0
         self.iteration = 0
         self.loss = 0
+        self.entropy = 0
         
-        self.entropy_loss_coeff = 0.05
+        
+        self.entropy_loss_coeff = entropy_loss_coeff
     
-    def ppo_loss(self, states_tensor, actions_tensor, advantages_tensor, returns_tensor, old_log_probs_tensor):
+    def ppo_loss(self, states_tensor: torch.Tensor, actions_tensor: torch.Tensor, 
+                 advantages_tensor: torch.Tensor, returns_tensor: torch.Tensor, 
+                 old_log_probs_tensor: torch.Tensor) -> None:
         features = self.encoder(states_tensor)
         logits = self.actor(features)
         distribution = torch.distributions.Categorical(logits=logits)
         log_probs = distribution.log_prob(actions_tensor)
-        entropy = distribution.entropy().mean()
+        self.entropy = distribution.entropy().mean()
         
         ratio = torch.exp(log_probs - old_log_probs_tensor)
         ratio_clipped = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio)
@@ -113,9 +119,9 @@ class PPOAgent:
         
         self.loss = -torch.min(ratio * advantages_tensor, ratio_clipped * advantages_tensor).mean() + \
             self.critic_loss_coeff * F.mse_loss(values, returns_tensor) - \
-            self.entropy_loss_coeff * entropy
+            self.entropy_loss_coeff * self.entropy
             
-    def act(self, state):
+    def act(self, state: np.ndarray | torch.Tensor) -> tuple[float, int, float]:
         with torch.no_grad():
             if not isinstance(state, torch.Tensor):
                 state = torch.as_tensor(np.asarray(state), dtype=torch.float32).to(self.actor.device)
@@ -125,10 +131,11 @@ class PPOAgent:
             features = self.encoder(state)
             log_probs, action = self.actor.action_probs(features)
             value = self.critic(features).item()
-            return value, action, log_probs
+            return value, action.item(), log_probs.item()
             
         
-    def train(self, state, reward, value, log_prob, done, action, writer = None):
+    def train(self, state: np.ndarray | torch.Tensor, reward: float, value: float, 
+              log_prob: float, done: bool, action: int, writer: SummaryWriter = None, ep: int = 0) -> None:
         self.steps += 1
         self.memory.append_new(state, action, reward, value, log_prob, done)
         
@@ -136,6 +143,7 @@ class PPOAgent:
             
             advantages, returns = self.memory.compute_gae(self.gamma, self.gae_lambda)
             
+                
             states_tensor = torch.from_numpy(self.memory.states).float().to(self.actor.device)
             actions_tensor = torch.from_numpy(self.memory.actions).to(self.actor.device)
             advantages_tensor = torch.from_numpy(advantages).float().to(self.actor.device)
@@ -149,16 +157,36 @@ class PPOAgent:
                     self.ppo_loss(states_tensor[batch_idx], actions_tensor[batch_idx], advantages_tensor[batch_idx], returns_tensor[batch_idx], old_log_probs_tensor[batch_idx])
                     self.optimizer.zero_grad()
                     self.loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
-                    torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
-                    torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 1.0)
+                    #torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+                    #torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
+                    #torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 1.0)
                     
                     self.optimizer.step()
+            if writer:
+                writer.add_scalar("Log/Advantage_mean", advantages.mean(), ep)
+                writer.add_scalar("Log/Advantages_std", advantages.std(),ep)
+                writer.add_scalar("Log/Entropy", self.entropy, ep)
+                writer.add_scalar("Log/loss", self.loss, ep)
+                self.log_gradients(writer, ep)
                 
             self.memory.clear()
+            
+    def log_gradients(self, writer: SummaryWriter, step: int) -> None:
+        total_norm = 0.0
+        for param in self.encoder.parameters():
+            if param.grad is not None:
+                total_norm += param.grad.data.norm(2).item() ** 2
+        for param in self.actor.parameters():
+            if param.grad is not None:
+                total_norm += param.grad.data.norm(2).item() ** 2
+        for param in self.critic.parameters():
+            if param.grad is not None:
+                total_norm += param.grad.data.norm(2).item() ** 2
+        
+        writer.add_scalar("Gradients/Total_Norm", total_norm ** 0.5, step)
 
     
-    def save(self, path):
+    def save(self, path: str) -> None:
         torch.save({
             'actor_state_dict': self.actor.state_dict(),
             'critic_state_dict': self.critic.state_dict(),
@@ -166,7 +194,7 @@ class PPOAgent:
             'optimizer_state_dict': self.optimizer.state_dict(),
         }, path)
         
-    def load(self, path):
+    def load(self, path: str) -> None:
         model = torch.load(path, map_location=self.actor.device)
         self.encoder.load_state_dict(model['encoder_state_dict'])
         self.actor.load_state_dict(model['actor_state_dict'])
