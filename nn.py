@@ -60,10 +60,10 @@ class Actor(nn.Module):
     def action_probs(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.no_grad():
             logits = self.forward(state)
-            probs = F.softmax(logits, dim=-1)
-            distribution = torch.distributions.Categorical(probs)
+            probs = torch.sigmoid(logits)
+            distribution = torch.distributions.Bernoulli(probs)
             action = distribution.sample()
-            log_prob = distribution.log_prob(action)
+            log_prob = distribution.log_prob(action).sum(dim=-1, keepdim=True)
             return log_prob, action 
         
 class Critic(nn.Module):

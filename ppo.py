@@ -7,18 +7,18 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 class Memory:
-    def __init__(self,size: int, state_shape: tuple[int,int,int,int] = (4,64,64,3)):
+    def __init__(self,size: int, state_shape: tuple[int,int,int,int] = (4,64,64,3),action_size: int = 9):
         self.clear()
         self.idx = 0
         self.size = size
         self.states = np.zeros((size, *state_shape), dtype=np.uint8)
-        self.actions = np.zeros(size, dtype=np.int64)
+        self.actions = np.zeros((size, action_size), dtype=np.float32)
         self.rewards = np.zeros(size, dtype=np.float32)
         self.dones = np.zeros(size, dtype=np.float32)
         self.log_probs = np.zeros(size, dtype=np.float32)
         self.values = np.zeros(size, dtype=np.float32)
     
-    def append_new(self, state: np.ndarray | torch.Tensor, action: int, reward: float, 
+    def append_new(self, state: np.ndarray | torch.Tensor, action: np.ndarray, reward: float, 
                    value: float, log_prob: float, done: bool) -> None:
         self.states[self.idx] =state
         self.actions[self.idx] = action
@@ -73,13 +73,15 @@ class Memory:
         return (advantage - advantage.mean()) / (advantage.std() + 1e-8)
     
 class PPOAgent:
-    def __init__(self, action_size: int, lr: float = 5e-4,
+    def __init__(self, action_size: int, lr: float = 2.5e-4,
                  gamma: float = 0.99, clip_ratio: float = 0.2, ppo_epochs: int = 4,
                  hidden_size: int = 512, layers_num: int = 0, normalize: bool = False,
-                 critic_loss_coeff: float = 0.3, update_period: int = 8192, frame_size: int = 4,
+                 critic_loss_coeff: float = 0.5, update_period: int = 8192, frame_size: int = 4,
                  feature_size: int = 256, channels_size: int = 3, batch_size: int = 256, 
-                 gae_lambda: float = 0.95, entropy_loss_coeff = 0.02):
+                 gae_lambda: float = 0.95, entropy_loss_coeff: float = 0.05, entropy_coeff_decay: float = 0.995,
+                 min_entropy: float = 0.001):
         self.gamma = gamma
+        self.action_size = action_size
         self.batch_size = batch_size
         self.gae_lambda = gae_lambda
         self.clip_ratio = clip_ratio
@@ -94,28 +96,30 @@ class PPOAgent:
         all_params = list(self.encoder.parameters()) + list(self.actor.parameters()) + list(self.critic.parameters())
         self.optimizer = torch.optim.Adam(all_params, lr=lr)
         
-        self.memory = Memory(update_period)
+        self.memory = Memory(update_period, action_size=self.action_size)
         
         self.steps = 0
         self.iteration = 0
         self.loss = 0
         self.entropy = 0
         
-        
         self.entropy_loss_coeff = entropy_loss_coeff
+        self.entropy_coeff_decay = entropy_coeff_decay
+        self.min_entropy = min_entropy
     
     def ppo_loss(self, states_tensor: torch.Tensor, actions_tensor: torch.Tensor, 
                  advantages_tensor: torch.Tensor, returns_tensor: torch.Tensor, 
                  old_log_probs_tensor: torch.Tensor) -> None:
         features = self.encoder(states_tensor)
         logits = self.actor(features)
-        distribution = torch.distributions.Categorical(logits=logits)
-        log_probs = distribution.log_prob(actions_tensor)
+        probs = torch.sigmoid(logits)
+        distribution = torch.distributions.Bernoulli(probs)
+        log_probs = distribution.log_prob(actions_tensor).sum(dim=-1, keepdim=True)
         self.entropy = distribution.entropy().mean()
         
         ratio = torch.exp(log_probs - old_log_probs_tensor)
         ratio_clipped = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio)
-        values = self.critic(features)
+        values = self.critic(features).squeeze(-1)
         
         self.loss = -torch.min(ratio * advantages_tensor, ratio_clipped * advantages_tensor).mean() + \
             self.critic_loss_coeff * F.mse_loss(values, returns_tensor) - \
@@ -131,11 +135,11 @@ class PPOAgent:
             features = self.encoder(state)
             log_probs, action = self.actor.action_probs(features)
             value = self.critic(features).item()
-            return value, action.item(), log_probs.item()
+            return value, action.cpu().numpy().flatten(), log_probs.item()
             
         
     def train(self, state: np.ndarray | torch.Tensor, reward: float, value: float, 
-              log_prob: float, done: bool, action: int, writer: SummaryWriter = None, ep: int = 0) -> None:
+              log_prob: float, done: bool, action: np.ndarray, writer: SummaryWriter = None, ep: int = 0) -> None:
         self.steps += 1
         self.memory.append_new(state, action, reward, value, log_prob, done)
         
@@ -157,9 +161,9 @@ class PPOAgent:
                     self.ppo_loss(states_tensor[batch_idx], actions_tensor[batch_idx], advantages_tensor[batch_idx], returns_tensor[batch_idx], old_log_probs_tensor[batch_idx])
                     self.optimizer.zero_grad()
                     self.loss.backward()
-                    #torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
-                    #torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
-                    #torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 1.0)
+                    torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+                    torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
+                    torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 1.0)
                     
                     self.optimizer.step()
             if writer:
@@ -167,7 +171,11 @@ class PPOAgent:
                 writer.add_scalar("Log/Advantages_std", advantages.std(),ep)
                 writer.add_scalar("Log/Entropy", self.entropy, ep)
                 writer.add_scalar("Log/loss", self.loss, ep)
+                writer.add_scalar("Log/Entropy_coeff", self.entropy_loss_coeff, ep)
                 self.log_gradients(writer, ep)
+                
+            self.entropy_loss_coeff = max(self.min_entropy, 
+                                          self.entropy_loss_coeff * self.entropy_coeff_decay)
                 
             self.memory.clear()
             
