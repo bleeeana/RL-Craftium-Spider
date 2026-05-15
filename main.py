@@ -23,7 +23,7 @@ class Solver:
         
         self.env_name = env_name
         self.episodes = episodes
-        self.agent = PPOAgent(action_size=9, layers_num=2)
+        self.agent = PPOAgent(action_size=6, layers_num=2)
         self.episode_rewards = []
     
     def run(self, save_best : bool = False, writer: SummaryWriter = None) -> None:
@@ -31,8 +31,7 @@ class Solver:
         env = BinaryActionWrapper(
             env,
             actions=[
-                "forward", "left", "right", "jump", "dig",                                
-                "mouse x+", "mouse x-", "mouse y+", "mouse y-",               
+                "forward", "dig", "mouse x+", "mouse x-", "mouse y+", "mouse y-",               
             ],
             mouse_mov=0.4
         )
@@ -79,8 +78,7 @@ class Solver:
         env = BinaryActionWrapper(
             env,
             actions=[
-                "forward", "left", "right", "jump", "dig",                                
-                "mouse x+", "mouse x-", "mouse y+", "mouse y-",               
+                "forward", "dig", "mouse x+", "mouse x-", "mouse y+", "mouse y-",               
             ],
             mouse_mov=0.4
         )

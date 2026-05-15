@@ -2,10 +2,10 @@ import gymnasium as gym
 import numpy as np
 
 class ChangeRewardWrapper(gym.Wrapper):
-    def __init__(self, env, attack_idx: int = 4, attack_bonus: float = 0.05,  
-                 afk_penalty: float = -0.02, kill_bonus: float = 15.0,
-                 miss_penalty: float = -0.06, max_miss: int = 7, 
-                 attack_bonus_decay: float = 0.997, min_attack_bonus = 0.002):
+    def __init__(self, env, attack_idx: int = 1, attack_bonus: float = 0.00,  
+                 afk_penalty: float = -0.02, kill_bonus: float = 4.0,
+                 miss_penalty: float = -0.05, max_miss: int = 3, 
+                 attack_bonus_decay: float = 0.999, min_attack_bonus = 0.00):
         super(ChangeRewardWrapper, self).__init__(env)
         self.attack_idx = attack_idx
         self.attack_bonus = attack_bonus

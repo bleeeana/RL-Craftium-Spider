@@ -78,8 +78,8 @@ class PPOAgent:
                  hidden_size: int = 512, layers_num: int = 0, normalize: bool = False,
                  critic_loss_coeff: float = 0.5, update_period: int = 8192, frame_size: int = 4,
                  feature_size: int = 256, channels_size: int = 3, batch_size: int = 256, 
-                 gae_lambda: float = 0.95, entropy_loss_coeff: float = 0.05, entropy_coeff_decay: float = 0.995,
-                 min_entropy: float = 0.001):
+                 gae_lambda: float = 0.95, entropy_loss_coeff: float = 0.00, entropy_coeff_decay: float = 0.995,
+                 min_entropy: float = 0.000):
         self.gamma = gamma
         self.action_size = action_size
         self.batch_size = batch_size
@@ -122,8 +122,7 @@ class PPOAgent:
         values = self.critic(features).squeeze(-1)
         
         self.loss = -torch.min(ratio * advantages_tensor, ratio_clipped * advantages_tensor).mean() + \
-            self.critic_loss_coeff * F.mse_loss(values, returns_tensor) - \
-            self.entropy_loss_coeff * self.entropy
+            self.critic_loss_coeff * F.mse_loss(values, returns_tensor) #- self.entropy_loss_coeff * self.entropy
             
     def act(self, state: np.ndarray | torch.Tensor) -> tuple[float, int, float]:
         with torch.no_grad():
