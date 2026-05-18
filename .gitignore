@@ -2,4 +2,4 @@ __pycache__/
 luanti-run-
 luanti-run-*/
 runs/
-spider-*
+*spider-attack.*

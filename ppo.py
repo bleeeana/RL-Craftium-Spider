@@ -7,12 +7,12 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 class Memory:
-    def __init__(self,size: int, state_shape: tuple[int,int,int,int] = (4,64,64,3),action_size: int = 9):
+    def __init__(self,size: int, action_wrapper: str, state_shape: tuple[int,int,int,int] = (4,64,64,3),action_size: int = 9):
         self.clear()
         self.idx = 0
         self.size = size
-        self.states = np.zeros((size, *state_shape), dtype=np.uint8)
-        self.actions = np.zeros((size, action_size), dtype=np.float32)
+        self.states = np.zeros((size, *state_shape), dtype=np.uint8) 
+        self.actions = np.zeros((size, action_size), dtype=np.float32) if action_wrapper == "binary" else np.zeros(size, dtype=np.int64)
         self.rewards = np.zeros(size, dtype=np.float32)
         self.dones = np.zeros(size, dtype=np.float32)
         self.log_probs = np.zeros(size, dtype=np.float32)
@@ -61,25 +61,16 @@ class Memory:
             
         returns = advantages + self.values
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        
         return advantages, returns
-        
-    
-    def compute_advantage(self, returns: np.ndarray | list[float], values: np.ndarray | list[float]) -> np.ndarray:
-        return np.array(returns) - np.array(values)
-    
-    def compute_normalized_advantage(self, returns: np.ndarray, values: np.ndarray) -> np.ndarray:
-        advantage = self.compute_advantage(returns, values)
-        return (advantage - advantage.mean()) / (advantage.std() + 1e-8)
     
 class PPOAgent:
     def __init__(self, action_size: int, lr: float = 2.5e-4,
                  gamma: float = 0.99, clip_ratio: float = 0.2, ppo_epochs: int = 4,
-                 hidden_size: int = 512, layers_num: int = 0, normalize: bool = False,
-                 critic_loss_coeff: float = 0.5, update_period: int = 8192, frame_size: int = 4,
+                 hidden_size: int = 512, layers_num: int = 0, action_wrapper: str = "binary",
+                 critic_loss_coeff: float = 0.5, update_period: int = 4096, frame_size: int = 4,
                  feature_size: int = 256, channels_size: int = 3, batch_size: int = 256, 
                  gae_lambda: float = 0.95, entropy_loss_coeff: float = 0.00, entropy_coeff_decay: float = 0.995,
-                 min_entropy: float = 0.000):
+                 min_entropy: float = 0.000 ):
         self.gamma = gamma
         self.action_size = action_size
         self.batch_size = batch_size
@@ -88,7 +79,8 @@ class PPOAgent:
         self.ppo_epochs = ppo_epochs
         self.critic_loss_coeff = critic_loss_coeff
         self.update_period = update_period
-        self.normalize = normalize
+        self.action_wrapper = action_wrapper
+
         self.actor = Actor(feature_size, hidden_size, action_size, layers_num)
         self.actor.to(self.actor.device)
         self.encoder = CNNEncoder(feature_size, channels_size, frame_size).to(self.actor.device)
@@ -96,7 +88,7 @@ class PPOAgent:
         all_params = list(self.encoder.parameters()) + list(self.actor.parameters()) + list(self.critic.parameters())
         self.optimizer = torch.optim.Adam(all_params, lr=lr)
         
-        self.memory = Memory(update_period, action_size=self.action_size)
+        self.memory = Memory(update_period, action_size=self.action_size, action_wrapper=self.action_wrapper)
         
         self.steps = 0
         self.iteration = 0
@@ -112,19 +104,30 @@ class PPOAgent:
                  old_log_probs_tensor: torch.Tensor) -> None:
         features = self.encoder(states_tensor)
         logits = self.actor(features)
-        probs = torch.sigmoid(logits)
-        distribution = torch.distributions.Bernoulli(probs)
-        log_probs = distribution.log_prob(actions_tensor).sum(dim=-1, keepdim=True)
+        if self.action_wrapper == "binary":
+            probs = torch.sigmoid(logits)
+            distribution = torch.distributions.Bernoulli(probs)
+            log_probs = distribution.log_prob(actions_tensor).sum(dim=-1) 
+        else: 
+            probs = F.softmax(logits, dim=-1)
+            distribution = torch.distributions.Categorical(probs)
+            log_probs = distribution.log_prob(actions_tensor.squeeze(-1).long())
+
         self.entropy = distribution.entropy().mean()
-        
+        #print(states_tensor.shape, actions_tensor.shape, advantages_tensor.shape, old_log_probs_tensor.shape, returns_tensor.shape)
         ratio = torch.exp(log_probs - old_log_probs_tensor)
         ratio_clipped = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio)
         values = self.critic(features).squeeze(-1)
         
-        self.loss = -torch.min(ratio * advantages_tensor, ratio_clipped * advantages_tensor).mean() + \
-            self.critic_loss_coeff * F.mse_loss(values, returns_tensor) #- self.entropy_loss_coeff * self.entropy
+        actor_loss = -torch.min(ratio * advantages_tensor, ratio_clipped * advantages_tensor).mean()
+        critic_loss = self.critic_loss_coeff * F.mse_loss(values, returns_tensor)
+        
+        
+        self.loss = actor_loss + critic_loss - self.entropy_loss_coeff * self.entropy
             
-    def act(self, state: np.ndarray | torch.Tensor) -> tuple[float, int, float]:
+        return probs, actor_loss, critic_loss
+    
+    def act(self, state: np.ndarray | torch.Tensor) -> tuple[float, np.ndarray | int, float]:
         with torch.no_grad():
             if not isinstance(state, torch.Tensor):
                 state = torch.as_tensor(np.asarray(state), dtype=torch.float32).to(self.actor.device)
@@ -132,9 +135,13 @@ class PPOAgent:
                 state = state.unsqueeze(0)
             
             features = self.encoder(state)
-            log_probs, action = self.actor.action_probs(features)
+            log_probs, action = self.actor.action_probs(features, action_wrapper=self.action_wrapper)
             value = self.critic(features).item()
-            return value, action.cpu().numpy().flatten(), log_probs.item()
+            if self.action_wrapper == "binary":
+                action = action.cpu().numpy().flatten()
+            else:
+                action = action.item()
+            return value, action, log_probs.item()
             
         
     def train(self, state: np.ndarray | torch.Tensor, reward: float, value: float, 
@@ -157,12 +164,12 @@ class PPOAgent:
                 for start in range(0,len(states_tensor), self.batch_size):
                     batch_idx = idx[start: start + self.batch_size]
                     
-                    self.ppo_loss(states_tensor[batch_idx], actions_tensor[batch_idx], advantages_tensor[batch_idx], returns_tensor[batch_idx], old_log_probs_tensor[batch_idx])
+                    probs, actor_loss, critit_loss = self.ppo_loss(states_tensor[batch_idx], actions_tensor[batch_idx], advantages_tensor[batch_idx], returns_tensor[batch_idx], old_log_probs_tensor[batch_idx])
                     self.optimizer.zero_grad()
                     self.loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
-                    torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
-                    torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 1.0)
+                    torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
+                    torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
+                    torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 0.5)
                     
                     self.optimizer.step()
             if writer:
@@ -170,7 +177,11 @@ class PPOAgent:
                 writer.add_scalar("Log/Advantages_std", advantages.std(),ep)
                 writer.add_scalar("Log/Entropy", self.entropy, ep)
                 writer.add_scalar("Log/loss", self.loss, ep)
+                writer.add_scalar("Log/actor_loss", actor_loss, ep)
+                writer.add_scalar("Log/critic_loss", critit_loss, ep)
+
                 writer.add_scalar("Log/Entropy_coeff", self.entropy_loss_coeff, ep)
+                writer.add_histogram("Policy/probs", probs.detach().cpu(),ep)
                 self.log_gradients(writer, ep)
                 
             self.entropy_loss_coeff = max(self.min_entropy, 
@@ -192,6 +203,10 @@ class PPOAgent:
         
         writer.add_scalar("Gradients/Total_Norm", total_norm ** 0.5, step)
 
+
+    def change_learning_rate(self, lr: float):
+        for param in self.optimizer.param_groups:
+            param['lr'] = lr
     
     def save(self, path: str) -> None:
         torch.save({

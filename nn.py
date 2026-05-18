@@ -45,11 +45,13 @@ class Actor(nn.Module):
             actual_size = hidden_size
         self.device = device
         self.activation = nn.ReLU()
-        self.layers.append(nn.Linear(actual_size, action_size))
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+                nn.init.orthogonal_(m.weight, np.sqrt(2))
                 nn.init.zeros_(m.bias)
+        self.layers.append(nn.Linear(actual_size, action_size))
+        nn.init.orthogonal_(self.layers[-1].weight, 0.01)
+        nn.init.zeros_(self.layers[-1].bias)
                 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         for layer in self.layers[:-1]:
@@ -57,13 +59,25 @@ class Actor(nn.Module):
         state = self.layers[-1](state)
         return state
         
-    def action_probs(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def action_probs(self, state: torch.Tensor, action_wrapper: str) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.binary_action_probs(state) if action_wrapper == "binary" else self.discrete_action_probs(state)
+        
+    def discrete_action_probs(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        with torch.no_grad():
+            logits = self.forward(state)
+            probs = F.softmax(logits, dim=-1)
+            distribution = torch.distributions.Categorical(probs)
+            action = distribution.sample()
+            log_prob = distribution.log_prob(action)
+            return log_prob, action 
+        
+    def binary_action_probs(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.no_grad():
             logits = self.forward(state)
             probs = torch.sigmoid(logits)
             distribution = torch.distributions.Bernoulli(probs)
             action = distribution.sample()
-            log_prob = distribution.log_prob(action).sum(dim=-1, keepdim=True)
+            log_prob = distribution.log_prob(action).sum(dim=-1)
             return log_prob, action 
         
 class Critic(nn.Module):
@@ -75,11 +89,14 @@ class Critic(nn.Module):
             self.layers.append(nn.Linear(actual_size, hidden_size))
             actual_size = hidden_size
         self.activation = nn.ReLU()
-        self.layers.append(nn.Linear(actual_size, action_size))
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
                 nn.init.zeros_(m.bias)
+                
+        self.layers.append(nn.Linear(actual_size, action_size))
+        nn.init.orthogonal_(self.layers[-1].weight, 1)
+        nn.init.zeros_(self.layers[-1].bias)
                 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
         for layer in self.layers[:-1]:
