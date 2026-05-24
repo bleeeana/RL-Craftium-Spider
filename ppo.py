@@ -41,16 +41,17 @@ class Memory:
             returns.insert(0, reward)
         return returns
     
-    def compute_gae(self, gamma: float, gae_lambda: float) -> tuple[np.ndarray, np.ndarray]:
+    def compute_gae(self, gamma: float, gae_lambda: float,
+                    last_value: float = 0.0, last_done: bool = True) -> tuple[np.ndarray, np.ndarray]:
         last_gae = 0.0
         advantages = np.zeros(self.size, dtype=np.float32)
         for t in reversed(range(len(self.rewards))):
-            if t == len(self.rewards) - 1 or self.dones[t]:
-                next_value = 0.0
-                next_non_terminal = 1.0 - self.dones[t]
+            if t == len(self.rewards) - 1:
+                next_value = last_value
+                next_non_terminal = 1.0 - float(last_done)
             else:
                 next_value = self.values[t + 1]
-                next_non_terminal = 1.0
+                next_non_terminal = 1.0 - self.dones[t]
                 
             # TD-ошибка: r_t + gamma*V(s_t+1)*(1-done) - V(s_t)
             delta = self.rewards[t] + gamma * next_value * next_non_terminal - self.values[t]
@@ -64,13 +65,13 @@ class Memory:
         return advantages, returns
     
 class PPOAgent:
-    def __init__(self, action_size: int, lr: float = 2.5e-4,
-                 gamma: float = 0.99, clip_ratio: float = 0.2, ppo_epochs: int = 4,
+    def __init__(self, action_size: int, lr: float = 5e-4,
+                 gamma: float = 0.995, clip_ratio: float = 0.1, ppo_epochs: int = 8,
                  hidden_size: int = 512, layers_num: int = 0, action_wrapper: str = "binary",
-                 critic_loss_coeff: float = 0.5, update_period: int = 4096, frame_size: int = 4,
+                 critic_loss_coeff: float = 0.5, update_period: int = 2048, frame_size: int = 4,
                  feature_size: int = 256, channels_size: int = 3, batch_size: int = 256, 
-                 gae_lambda: float = 0.95, entropy_loss_coeff: float = 0.00, entropy_coeff_decay: float = 0.995,
-                 min_entropy: float = 0.000 ):
+                 gae_lambda: float = 0.95, entropy_loss_coeff: float = 0.1, entropy_coeff_decay: float = 0.995,
+                 min_entropy: float = 0.00):
         self.gamma = gamma
         self.action_size = action_size
         self.batch_size = batch_size
@@ -86,7 +87,7 @@ class PPOAgent:
         self.encoder = CNNEncoder(feature_size, channels_size, frame_size).to(self.actor.device)
         self.critic = Critic(feature_size, hidden_size, 1, layers_num).to(self.actor.device)
         all_params = list(self.encoder.parameters()) + list(self.actor.parameters()) + list(self.critic.parameters())
-        self.optimizer = torch.optim.Adam(all_params, lr=lr)
+        self.optimizer = torch.optim.Adam(all_params, lr=lr, eps=1e-5)
         
         self.memory = Memory(update_period, action_size=self.action_size, action_wrapper=self.action_wrapper)
         
@@ -108,12 +109,12 @@ class PPOAgent:
             probs = torch.sigmoid(logits)
             distribution = torch.distributions.Bernoulli(probs)
             log_probs = distribution.log_prob(actions_tensor).sum(dim=-1) 
+            self.entropy = distribution.entropy().sum(dim=-1).mean()
         else: 
             probs = F.softmax(logits, dim=-1)
             distribution = torch.distributions.Categorical(probs)
             log_probs = distribution.log_prob(actions_tensor.squeeze(-1).long())
-
-        self.entropy = distribution.entropy().mean()
+            self.entropy = distribution.entropy().mean()
         #print(states_tensor.shape, actions_tensor.shape, advantages_tensor.shape, old_log_probs_tensor.shape, returns_tensor.shape)
         ratio = torch.exp(log_probs - old_log_probs_tensor)
         ratio_clipped = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio)
@@ -143,16 +144,25 @@ class PPOAgent:
                 action = action.item()
             return value, action, log_probs.item()
             
+    def estimate_value(self, state: np.ndarray | torch.Tensor) -> float:
+        with torch.no_grad():
+            if not isinstance(state, torch.Tensor):
+                state = torch.as_tensor(np.asarray(state), dtype=torch.float32).to(self.actor.device)
+            if state.dim() == 4:
+                state = state.unsqueeze(0)
+            features = self.encoder(state)
+            return self.critic(features).item()
         
     def train(self, state: np.ndarray | torch.Tensor, reward: float, value: float, 
-              log_prob: float, done: bool, action: np.ndarray, writer: SummaryWriter = None, ep: int = 0) -> None:
+              log_prob: float, done: bool, action: np.ndarray, writer: SummaryWriter = None, ep: int = 0,
+              next_state: np.ndarray | torch.Tensor | None = None) -> None:
         self.steps += 1
         self.memory.append_new(state, action, reward, value, log_prob, done)
         
         if self.steps % self.update_period == 0:
             
-            advantages, returns = self.memory.compute_gae(self.gamma, self.gae_lambda)
-            
+            last_value = 0.0 if done or next_state is None else self.estimate_value(next_state)
+            advantages, returns = self.memory.compute_gae(self.gamma, self.gae_lambda, last_value, done)
                 
             states_tensor = torch.from_numpy(self.memory.states).float().to(self.actor.device)
             actions_tensor = torch.from_numpy(self.memory.actions).to(self.actor.device)

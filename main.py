@@ -17,49 +17,71 @@ torch.manual_seed(SEED)
 np.random.seed(SEED)
 random.seed(SEED)
 
+SPIDER_ACTIONS = [
+    "forward",
+    "left",
+    "right",
+    "jump",
+    "dig",
+    "mouse x+",
+    "mouse x-",
+    "mouse y+",
+    "mouse y-",
+]
+
 class Solver:
-    def __init__(self, env_name:str = "Craftium/SpidersAttack-v0", episodes: int = 4000, env_type: str = "binary"):
+    def __init__(self, env_name:str = "Craftium/SpidersAttack-v0", episodes: int = 4000, env_type: str = "discrete"):
         self.scores = []
         self.env_type = env_type
         self.env_name = env_name
         self.episodes = episodes
         if self.env_type == "binary":
-            action_size = 6
+            action_size = len(SPIDER_ACTIONS)
         elif self.env_type == "discrete":
-            action_size = 7  
+            action_size = len(SPIDER_ACTIONS) + 1
+        else:
+            raise ValueError(f"Unknown env_type: {self.env_type}")
         self.agent = PPOAgent(action_size=action_size, layers_num=2, action_wrapper=env_type)
         self.episode_rewards = []
-    
+
     def run(self, save_best: bool = False, writer: SummaryWriter = None) -> None:
-        env = self.make_env()
+        env = self.make_env(render_mode=None)
         self.train_cycle(save_best, writer, env, self.episodes)
 
 
-    def make_env(self):
-        return self.make_binary_env() if self.env_type == "binary" else self.make_discrete_env()
+    def make_env(self, render_mode: str | None = None):
+        return self.make_binary_env(render_mode) if self.env_type == "binary" else self.make_discrete_env(render_mode)
+
+    def make_base_env(self, render_mode: str | None = None):
+        kwargs = {
+            "frameskip": 4,
+            "fps_max": 200,
+            "enable_voxel_obs": True
+        }
+        if render_mode is not None:
+            kwargs["render_mode"] = render_mode
+        return gym.make(self.env_name, **kwargs).unwrapped
     
-    def make_binary_env(self):
-        env = gym.make(self.env_name, render_mode="rgb_array").unwrapped
+    def make_binary_env(self, render_mode: str | None = None):
+        env = self.make_base_env(render_mode)
         env = BinaryActionWrapper(
             env,
-            actions=[
-                "forward", "dig", "mouse x+", "mouse x-", "mouse y+", "mouse y-",               
-            ],
+            actions=SPIDER_ACTIONS,
             mouse_mov=0.4
         )
-        env = ChangeRewardWrapper(env, attack_idx=1, action_wrapper="binary")
+        env = ChangeRewardWrapper(env, attack_idx=SPIDER_ACTIONS.index("dig"), action_wrapper="binary")
         env = gym.wrappers.FrameStack(env, num_stack=4)
         return env
     
-    def make_discrete_env(self):
-        env = gym.make(self.env_name, render_mode="rgb_array").unwrapped
+    def make_discrete_env(self, render_mode: str | None = None):
+        env = self.make_base_env(render_mode)
         env = DiscreteActionWrapper(
             env,
-            actions=["forward", "dig", "mouse x+", "mouse x-", "mouse y+", "mouse y-"],
+            actions=SPIDER_ACTIONS,
             mouse_mov=0.4
         )
         
-        env = ChangeRewardWrapper(env, attack_idx=2, action_wrapper="discrete")
+        env = ChangeRewardWrapper(env, attack_idx=SPIDER_ACTIONS.index("dig") + 1, action_wrapper="discrete")
         env = gym.wrappers.FrameStack(env, num_stack=4)
         return env
 
@@ -71,10 +93,11 @@ class Solver:
             env = self.make_discrete_env()
         else:
             env = self.make_binary_env()
-        self.train_cycle(save_best, writer, env, episodes, self.env_type + "finetuned-spider-attack.pth")
+        self.train_cycle(save_best, writer, env, episodes, "finetuned-spider-attack.pth")
 
     def train_cycle(self, save_best: bool, writer: SummaryWriter, env, episodes: int, save_name: str = "spider-attack.pth"):
         best_score = -float('inf')
+        checkpoint_path = self.env_type + save_name
         for ep in range(episodes):
             state, _ = env.reset()
             episode_reward = 0
@@ -90,7 +113,7 @@ class Solver:
                 episode_raw_reward += raw_reward
                 episode_reward += new_reward
                 done = terminated or truncated
-                self.agent.train(state,new_reward, value, log_prob, done, action, writer, ep)
+                self.agent.train(state, new_reward, value, log_prob, done, action, writer, ep, next_state)
                 state = next_state
                 if done:
                     if writer:
@@ -106,16 +129,19 @@ class Solver:
                     break
             if save_best and avg > best_score:
                 best_score = avg
-                self.agent.save(self.env_type + save_name)
+                self.agent.save(checkpoint_path)
                 
         env.close()
          
     def test(self, episodes: int = 10, render: bool = True, record: bool = False, 
-             video_folder: str = None) -> None:
-        self.agent.load(self.env_type + "spider-attack.pth")
+             video_folder: str = None, checkpoint: str | None = None) -> None:
+        if checkpoint is None:
+            finetuned = Path(self.env_type + "finetuned-spider-attack.pth")
+            checkpoint = str(finetuned if finetuned.exists() else Path(self.env_type + "spider-attack.pth"))
+        self.agent.load(checkpoint)
         
-        render_mode = "human" if render else "rgb_array"
-        env = self.make_env()
+        render_mode = "rgb_array" if record else ("human" if render else "rgb_array")
+        env = self.make_env(render_mode=render_mode)
         
         if record:
             Path(video_folder).mkdir(parents=True, exist_ok=True)
@@ -157,9 +183,9 @@ class Solver:
         env.close()
     
 def main():
-    exp_name = f"ppo__steps={4000}_ppoepochs={4}_updateperiod={4096}"
+    exp_name = f"ppo__steps={4000}_ppoepochs={4}_updateperiod={4096}_full_actions"
     writer = SummaryWriter(log_dir=f"runs/{datetime.now().strftime('%Y%m%d_%H%M%S')}/{exp_name}")
-    solver = Solver(env_type="binary")
+    solver = Solver(env_type="discrete")
     solver.run(True, writer)
     solver.fine_tune(save_best=True, writer=writer)
     solver.test(10,record=True,render=False,video_folder='videos')
