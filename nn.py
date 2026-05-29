@@ -65,8 +65,7 @@ class Actor(nn.Module):
     def discrete_action_probs(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.no_grad():
             logits = self.forward(state)
-            probs = F.softmax(logits, dim=-1)
-            distribution = torch.distributions.Categorical(probs)
+            distribution = torch.distributions.Categorical(logits=logits)
             action = distribution.sample()
             log_prob = distribution.log_prob(action)
             return log_prob, action 
@@ -74,8 +73,7 @@ class Actor(nn.Module):
     def binary_action_probs(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.no_grad():
             logits = self.forward(state)
-            probs = torch.sigmoid(logits)
-            distribution = torch.distributions.Bernoulli(probs)
+            distribution = torch.distributions.Bernoulli(logits=logits)
             action = distribution.sample()
             log_prob = distribution.log_prob(action).sum(dim=-1)
             return log_prob, action 

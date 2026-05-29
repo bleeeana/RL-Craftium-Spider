@@ -2,17 +2,17 @@ import gymnasium as gym
 import numpy as np
 
 class ChangeRewardWrapper(gym.Wrapper):
-    def __init__(self, env, attack_idx: int = 1, miss_penalty: float = -0.01,  
-                 afk_penalty: float = -0.005, kill_bonus: float = 1.5,
+    def __init__(self, env, attack_idx: int = 1, miss_penalty: float = -0.05,  
+                 afk_penalty: float = -0.01, kill_bonus: float = 4.5,
                  mouse_x_plus_idx: int = 5, mouse_x_minus_idx: int = 6,
                  mouse_y_plus_idx: int = 7, mouse_y_minus_idx: int = 8,
                  jitter_penalty: float = -0.02, action_wrapper: str = 'binary',
-                 still_steps_threshold: int = 15, extra_kill_bonus: int = 1,
+                 still_steps_threshold: int = 15, extra_kill_bonus: int = 1.5,
                  time_bonus: float = 1.5, min_time_bonus: float = 0.3, 
-                 time_bonus_decay: float = 0.9995, death_penalty: float = -2.0,
-                 attack_bonus: float = 0.01, attack_bonus_decay: float = 0.999,
-                 min_attack_bonus: float = 0.003, miss_threshold: int = 5,
-                 base_bonus: float = 0.0015):
+                 time_bonus_decay: float = 0.9995, death_penalty: float = -1.0,
+                 attack_bonus: float = 0.05, attack_bonus_decay: float = 1.0,
+                 min_attack_bonus: float = 0.003, miss_threshold: int = 8,
+                 base_bonus: float = 0.000):
         super(ChangeRewardWrapper, self).__init__(env)
         self.attack_idx = attack_idx
         self.miss_penalty = miss_penalty
@@ -81,7 +81,7 @@ class ChangeRewardWrapper(gym.Wrapper):
                 self.still_count = 0 
 
 
-        if terminated and self.episode_kills < 15:
+        if terminated:
             bonus += self.death_penalty
             
         new_reward = bonus + reward
@@ -112,7 +112,6 @@ class ChangeRewardWrapper(gym.Wrapper):
         elif action not in [0, self.attack_idx]:
             bonus += self.base_bonus
 
-
         if reward > 0:
             self.episode_kills += 1
             bonus += (self.kill_bonus + (self.episode_kills - 1) * self.extra_kill_bonus) * self.time_bonus
@@ -127,7 +126,7 @@ class ChangeRewardWrapper(gym.Wrapper):
             else:
                 self.still_count = 0 
 
-        if terminated and self.episode_kills < 15:
+        if terminated:
             bonus += self.death_penalty
                 
         new_reward = bonus + reward

@@ -7,71 +7,70 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 class Memory:
-    def __init__(self,size: int, action_wrapper: str, state_shape: tuple[int,int,int,int] = (4,64,64,3),action_size: int = 9):
-        self.clear()
+    def __init__(self, size_per_env: int, num_envs: int, action_wrapper: str, state_shape: tuple[int,int,int,int] = (4,64,64,3), action_size: int = 9):
         self.idx = 0
-        self.size = size
-        self.states = np.zeros((size, *state_shape), dtype=np.uint8) 
-        self.actions = np.zeros((size, action_size), dtype=np.float32) if action_wrapper == "binary" else np.zeros(size, dtype=np.int64)
-        self.rewards = np.zeros(size, dtype=np.float32)
-        self.dones = np.zeros(size, dtype=np.float32)
-        self.log_probs = np.zeros(size, dtype=np.float32)
-        self.values = np.zeros(size, dtype=np.float32)
+        self.size = size_per_env
+        self.num_envs = num_envs
+        self.state_shape = state_shape
+        self.action_size = action_size
+        self.action_wrapper = action_wrapper
+
+        self.states = np.zeros((self.size, self.num_envs, *state_shape), dtype=np.uint8) 
+        self.actions = np.zeros((self.size, self.num_envs, action_size), dtype=np.float32) if action_wrapper == "binary" else np.zeros((self.size, self.num_envs), dtype=np.int64)
+        self.rewards = np.zeros((self.size, self.num_envs), dtype=np.float32)
+        self.dones = np.zeros((self.size, self.num_envs), dtype=np.float32)
+        self.log_probs = np.zeros((self.size, self.num_envs), dtype=np.float32)
+        self.values = np.zeros((self.size, self.num_envs), dtype=np.float32)
     
-    def append_new(self, state: np.ndarray | torch.Tensor, action: np.ndarray, reward: float, 
-                   value: float, log_prob: float, done: bool) -> None:
-        self.states[self.idx] =state
-        self.actions[self.idx] = action
-        self.rewards[self.idx] = reward
-        self.log_probs[self.idx] = log_prob
-        self.dones[self.idx] = done
-        self.values[self.idx] = value
+    def append_new(self, states: np.ndarray, actions: np.ndarray, rewards: np.ndarray, 
+                   values: np.ndarray, log_probs: np.ndarray, dones: np.ndarray) -> None:
+        self.states[self.idx] = states
+        self.actions[self.idx] = actions
+        self.rewards[self.idx] = rewards
+        self.log_probs[self.idx] = log_probs
+        self.dones[self.idx] = dones
+        self.values[self.idx] = values
         self.idx += 1
 
     def clear(self) -> None:
         self.idx = 0
         
-    def compute_returns(self, gamma: float) -> list[float]:
-        returns = []
-        reward = 0
-        for r, done in zip(reversed(self.rewards), reversed(self.dones)):
-            if done:
-                reward = 0
-            reward = r + gamma * reward
-            returns.insert(0, reward)
-        return returns
-    
     def compute_gae(self, gamma: float, gae_lambda: float,
-                    last_value: float = 0.0, last_done: bool = True) -> tuple[np.ndarray, np.ndarray]:
-        last_gae = 0.0
-        advantages = np.zeros(self.size, dtype=np.float32)
-        for t in reversed(range(len(self.rewards))):
-            if t == len(self.rewards) - 1:
-                next_value = last_value
-                next_non_terminal = 1.0 - float(last_done)
+                    last_values: np.ndarray, last_dones: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        last_gae = np.zeros(self.num_envs, dtype=np.float32)
+        advantages = np.zeros((self.size, self.num_envs), dtype=np.float32)
+        
+        for t in reversed(range(self.size)):
+            if t == self.size - 1:
+                next_values = last_values
+                next_non_terminal = 1.0 - last_dones
             else:
-                next_value = self.values[t + 1]
-                next_non_terminal = 1.0 - self.dones[t]
+                next_values = self.values[t + 1]
+                next_non_terminal = 1.0 - self.dones[t + 1]
                 
-            # TD-ошибка: r_t + gamma*V(s_t+1)*(1-done) - V(s_t)
-            delta = self.rewards[t] + gamma * next_value * next_non_terminal - self.values[t]
-            
-            # GAE: A_t = TD + gamma*gae_lambda*(1-done)*A_{t+1}
+            delta = self.rewards[t] + gamma * next_values * next_non_terminal - self.values[t]
             last_gae = delta + gamma * gae_lambda * next_non_terminal * last_gae
             advantages[t] = last_gae
             
         returns = advantages + self.values
+        
+        returns = returns.reshape(-1)
+        advantages = advantages.reshape(-1)
+        
+        returns = (returns - returns.mean()) / (returns.std() + 1e-8)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
         return advantages, returns
     
 class PPOAgent:
-    def __init__(self, action_size: int, lr: float = 5e-4,
-                 gamma: float = 0.995, clip_ratio: float = 0.1, ppo_epochs: int = 8,
+    def __init__(self, action_size: int, lr: float = 2.5e-4,
+                 gamma: float = 0.999, clip_ratio: float = 0.1, ppo_epochs: int = 4,
                  hidden_size: int = 512, layers_num: int = 0, action_wrapper: str = "binary",
                  critic_loss_coeff: float = 0.5, update_period: int = 2048, frame_size: int = 4,
                  feature_size: int = 256, channels_size: int = 3, batch_size: int = 256, 
-                 gae_lambda: float = 0.95, entropy_loss_coeff: float = 0.1, entropy_coeff_decay: float = 0.995,
-                 min_entropy: float = 0.00):
+                 gae_lambda: float = 0.95, entropy_loss_coeff: float = 0.03, entropy_coeff_decay: float = 0.995,
+                 min_entropy: float = 0.00, use_scheduler: bool = True, updates: int = 4000,
+                 target_kl : float = 0.015):
         self.gamma = gamma
         self.action_size = action_size
         self.batch_size = batch_size
@@ -95,27 +94,27 @@ class PPOAgent:
         self.iteration = 0
         self.loss = 0
         self.entropy = 0
-        
+        self.start_lr = lr
         self.entropy_loss_coeff = entropy_loss_coeff
         self.entropy_coeff_decay = entropy_coeff_decay
         self.min_entropy = min_entropy
-    
+        self.use_scheduler = use_scheduler
+        self.updates = updates
+        self.target_kl = target_kl
+        
     def ppo_loss(self, states_tensor: torch.Tensor, actions_tensor: torch.Tensor, 
                  advantages_tensor: torch.Tensor, returns_tensor: torch.Tensor, 
                  old_log_probs_tensor: torch.Tensor) -> None:
         features = self.encoder(states_tensor)
         logits = self.actor(features)
         if self.action_wrapper == "binary":
-            probs = torch.sigmoid(logits)
-            distribution = torch.distributions.Bernoulli(probs)
+            distribution = torch.distributions.Bernoulli(logits=logits)
             log_probs = distribution.log_prob(actions_tensor).sum(dim=-1) 
             self.entropy = distribution.entropy().sum(dim=-1).mean()
         else: 
-            probs = F.softmax(logits, dim=-1)
-            distribution = torch.distributions.Categorical(probs)
+            distribution = torch.distributions.Categorical(logits=logits)
             log_probs = distribution.log_prob(actions_tensor.squeeze(-1).long())
             self.entropy = distribution.entropy().mean()
-        #print(states_tensor.shape, actions_tensor.shape, advantages_tensor.shape, old_log_probs_tensor.shape, returns_tensor.shape)
         ratio = torch.exp(log_probs - old_log_probs_tensor)
         ratio_clipped = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio)
         values = self.critic(features).squeeze(-1)
@@ -123,26 +122,26 @@ class PPOAgent:
         actor_loss = -torch.min(ratio * advantages_tensor, ratio_clipped * advantages_tensor).mean()
         critic_loss = self.critic_loss_coeff * F.mse_loss(values, returns_tensor)
         
-        
         self.loss = actor_loss + critic_loss - self.entropy_loss_coeff * self.entropy
+
+        with torch.no_grad():
+            approx_kl = ((ratio - 1) - log_probs + old_log_probs_tensor).mean()
             
-        return probs, actor_loss, critic_loss
+        return distribution.probs, actor_loss, critic_loss, approx_kl
     
     def act(self, state: np.ndarray | torch.Tensor) -> tuple[float, np.ndarray | int, float]:
         with torch.no_grad():
             if not isinstance(state, torch.Tensor):
                 state = torch.as_tensor(np.asarray(state), dtype=torch.float32).to(self.actor.device)
-            if state.dim() == 4:
-                state = state.unsqueeze(0)
             
             features = self.encoder(state)
             log_probs, action = self.actor.action_probs(features, action_wrapper=self.action_wrapper)
-            value = self.critic(features).item()
+            value = self.critic(features).squeeze(-1)
             if self.action_wrapper == "binary":
-                action = action.cpu().numpy().flatten()
+                action = action.cpu().numpy()
             else:
-                action = action.item()
-            return value, action, log_probs.item()
+                action = action.cpu().numpy()
+            return value.cpu().numpy(), action, log_probs.cpu().numpy()
             
     def estimate_value(self, state: np.ndarray | torch.Tensor) -> float:
         with torch.no_grad():
@@ -153,51 +152,65 @@ class PPOAgent:
             features = self.encoder(state)
             return self.critic(features).item()
         
-    def train(self, state: np.ndarray | torch.Tensor, reward: float, value: float, 
-              log_prob: float, done: bool, action: np.ndarray, writer: SummaryWriter = None, ep: int = 0,
+    def train(self, done: bool, writer: SummaryWriter = None, ep: int = 0,
               next_state: np.ndarray | torch.Tensor | None = None) -> None:
-        self.steps += 1
-        self.memory.append_new(state, action, reward, value, log_prob, done)
-        
-        if self.steps % self.update_period == 0:
-            
-            last_value = 0.0 if done or next_state is None else self.estimate_value(next_state)
-            advantages, returns = self.memory.compute_gae(self.gamma, self.gae_lambda, last_value, done)
-                
-            states_tensor = torch.from_numpy(self.memory.states).float().to(self.actor.device)
-            actions_tensor = torch.from_numpy(self.memory.actions).to(self.actor.device)
-            advantages_tensor = torch.from_numpy(advantages).float().to(self.actor.device)
-            returns_tensor = torch.from_numpy(returns).float().to(self.actor.device)
-            old_log_probs_tensor = torch.from_numpy(self.memory.log_probs).float().to(self.actor.device)
-            for _ in range(self.ppo_epochs):
-                idx = np.random.permutation(len(states_tensor))
-                for start in range(0,len(states_tensor), self.batch_size):
-                    batch_idx = idx[start: start + self.batch_size]
-                    
-                    probs, actor_loss, critit_loss = self.ppo_loss(states_tensor[batch_idx], actions_tensor[batch_idx], advantages_tensor[batch_idx], returns_tensor[batch_idx], old_log_probs_tensor[batch_idx])
-                    self.optimizer.zero_grad()
-                    self.loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
-                    torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
-                    torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 0.5)
-                    
-                    self.optimizer.step()
-            if writer:
-                writer.add_scalar("Log/Advantage_mean", advantages.mean(), ep)
-                writer.add_scalar("Log/Advantages_std", advantages.std(),ep)
-                writer.add_scalar("Log/Entropy", self.entropy, ep)
-                writer.add_scalar("Log/loss", self.loss, ep)
-                writer.add_scalar("Log/actor_loss", actor_loss, ep)
-                writer.add_scalar("Log/critic_loss", critit_loss, ep)
 
-                writer.add_scalar("Log/Entropy_coeff", self.entropy_loss_coeff, ep)
-                writer.add_histogram("Policy/probs", probs.detach().cpu(),ep)
-                self.log_gradients(writer, ep)
+        last_value = 0.0 if done or next_state is None else self.estimate_value(next_state)
+        advantages, returns = self.memory.compute_gae(self.gamma, self.gae_lambda, last_value, done)
+        states_tensor = torch.from_numpy(self.memory.states.reshape(-1, *self.memory.state_shape)).float().to(self.actor.device)
+        if self.action_wrapper == "binary":
+            actions_tensor = torch.from_numpy(self.memory.actions.reshape(-1, self.action_size)).to(self.actor.device)
+        else:
+            actions_tensor = torch.from_numpy(self.memory.actions.reshape(-1)).to(self.actor.device) 
+        advantages_tensor = torch.from_numpy(advantages).float().to(self.actor.device)
+        returns_tensor = torch.from_numpy(returns).float().to(self.actor.device)
+        old_log_probs_tensor = torch.from_numpy(self.memory.log_probs.reshape(-1)).float().to(self.actor.device)
+        for _ in range(self.ppo_epochs):
+            idx = np.random.permutation(len(states_tensor))
+            early_stop = False
+            for start in range(0,len(states_tensor), self.batch_size):
+                batch_idx = idx[start: start + self.batch_size]
                 
-            self.entropy_loss_coeff = max(self.min_entropy, 
-                                          self.entropy_loss_coeff * self.entropy_coeff_decay)
+                probs, actor_loss, critit_loss, approx_kl = self.ppo_loss(states_tensor[batch_idx], actions_tensor[batch_idx], advantages_tensor[batch_idx], returns_tensor[batch_idx], old_log_probs_tensor[batch_idx])
+                self.optimizer.zero_grad()
+                self.loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
+                torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
+                torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 0.5)
                 
-            self.memory.clear()
+                self.optimizer.step()
+
+                if getattr(self, "target_kl", None) is not None and approx_kl.item() > self.target_kl:
+                    early_stop = True
+                    break
+
+            if early_stop:
+                break
+
+        if writer:
+            writer.add_scalar("Log/Advantage_mean", advantages.mean(), ep)
+            writer.add_scalar("Log/Advantages_std", advantages.std(),ep)
+            writer.add_scalar("Log/Entropy", self.entropy, ep)
+            writer.add_scalar("Log/loss", self.loss, ep)
+            writer.add_scalar("Log/actor_loss", actor_loss, ep)
+            writer.add_scalar("Log/critic_loss", critit_loss, ep)
+
+            writer.add_scalar("Log/Entropy_coeff", self.entropy_loss_coeff, ep)
+            writer.add_histogram("Policy/probs", probs.detach().cpu(),ep)
+            self.log_gradients(writer, ep)
+
+        if self.use_scheduler:
+            frac = 1.0 - (ep / self.updates) 
+            current_lr = self.start_lr * frac
+
+            self.change_learning_rate(current_lr)
+            writer.add_scalar("Log/LR", current_lr, ep)
+
+            
+        self.entropy_loss_coeff = max(self.min_entropy, 
+                                        self.entropy_loss_coeff * self.entropy_coeff_decay)
+            
+        self.memory.clear()
             
     def log_gradients(self, writer: SummaryWriter, step: int) -> None:
         total_norm = 0.0
