@@ -15,7 +15,7 @@ class Memory:
         self.action_size = action_size
         self.action_wrapper = action_wrapper
 
-        self.states = np.zeros((self.size, self.num_envs, *state_shape), dtype=np.uint8) 
+        self.states = np.zeros((self.size, self.num_envs, *state_shape), dtype=np.float32) 
         self.actions = np.zeros((self.size, self.num_envs, action_size), dtype=np.float32) if action_wrapper == "binary" else np.zeros((self.size, self.num_envs), dtype=np.int64)
         self.rewards = np.zeros((self.size, self.num_envs), dtype=np.float32)
         self.dones = np.zeros((self.size, self.num_envs), dtype=np.float32)
@@ -70,7 +70,7 @@ class PPOAgent:
                  feature_size: int = 256, channels_size: int = 3, batch_size: int = 256, 
                  gae_lambda: float = 0.95, entropy_loss_coeff: float = 0.03, entropy_coeff_decay: float = 0.995,
                  min_entropy: float = 0.00, use_scheduler: bool = True, updates: int = 4000,
-                 target_kl : float = 0.015):
+                 target_kl : float = 0.015, num_envs: int = 4):
         self.gamma = gamma
         self.action_size = action_size
         self.batch_size = batch_size
@@ -88,7 +88,7 @@ class PPOAgent:
         all_params = list(self.encoder.parameters()) + list(self.actor.parameters()) + list(self.critic.parameters())
         self.optimizer = torch.optim.Adam(all_params, lr=lr, eps=1e-5)
         
-        self.memory = Memory(update_period, action_size=self.action_size, action_wrapper=self.action_wrapper)
+        self.memory = Memory(update_period // num_envs, num_envs, action_wrapper, action_size=action_size)
         
         self.steps = 0
         self.iteration = 0
@@ -150,12 +150,12 @@ class PPOAgent:
             if state.dim() == 4:
                 state = state.unsqueeze(0)
             features = self.encoder(state)
-            return self.critic(features).item()
+            return self.critic(features).cpu().numpy()
         
     def train(self, done: bool, writer: SummaryWriter = None, ep: int = 0,
               next_state: np.ndarray | torch.Tensor | None = None) -> None:
 
-        last_value = 0.0 if done or next_state is None else self.estimate_value(next_state)
+        last_value = self.estimate_value(next_state)
         advantages, returns = self.memory.compute_gae(self.gamma, self.gae_lambda, last_value, done)
         states_tensor = torch.from_numpy(self.memory.states.reshape(-1, *self.memory.state_shape)).float().to(self.actor.device)
         if self.action_wrapper == "binary":

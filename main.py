@@ -48,8 +48,8 @@ class Solver:
 
     def run(self, save_best: bool = False, writer: SummaryWriter = None) -> None:
         env_fns = [lambda i=i: self.make_env(i) for i in range(self.num_envs)]
-        env = gym.vector.SyncVectorEnv(env_fns)
-        self.train_cycle(save_best, writer, env, self.updates)
+        env = gym.vector.AsyncVectorEnv(env_fns)
+        self.train_cycle(save_best, writer, env)
 
 
     def make_env(self, env_idx: int, render_mode: str | None = None):
@@ -96,66 +96,70 @@ class Solver:
         return env
 
     def fine_tune(self, path: str = "spider-attack.pth", save_best: bool = False,
-                  writer: SummaryWriter = None, episodes: int = 2000, lr: float = 2.5e-4) -> None:
+                  writer: SummaryWriter = None, updates: int = 2000, lr: float = 2.5e-4) -> None:
         self.agent.load(self.env_type + path)
         self.agent.change_learning_rate(lr)
         env_fns = [lambda i=i: self.make_env(i) for i in range(self.num_envs)]
         env = gym.vector.SyncVectorEnv(env_fns)
-        self.train_cycle(save_best, writer, env, episodes, "finetuned-spider-attack.pth")
+        self.updates = updates
+        self.train_cycle(save_best, writer, env, "finetuned-spider-attack.pth")
 
-    def train_cycle(self, save_best: bool, writer: SummaryWriter, env, episodes: int, save_name: str = "spider-attack.pth"):
+    def train_cycle(self, save_best: bool, writer: SummaryWriter, env, save_name: str = "spider-attack.pth"):
         best_score = -float('inf')
+        print(self.env_type, save_name)
         checkpoint_path = self.env_type + save_name
         global_step = 0
         state, _ = env.reset()
         env_steps = self.agent.update_period // self.num_envs
+        
+        # Оставляем только для того, чтобы адекватно сохранять best_model
         self.ep_rewards_hist = deque(maxlen=50)
-        self.raw_rewards_hist = deque(maxlen=50)
-        self.attacks_hist = deque(maxlen=50)
-        self.misses_hist = deque(maxlen=50)
+
         for update in range(self.updates):
             for step in range(env_steps):
-
                 global_step += self.num_envs
                 value, action, log_prob = self.agent.act(state)
+                
                 if isinstance(action, np.ndarray) and self.env_type == "discrete":
                     action = action.astype(int)
+                    
                 next_state, reward, terminated, truncated, info = env.step(action)
                 done = np.logical_or(terminated, truncated)
                 
                 self.agent.memory.append_new(state, action, reward, value, log_prob, done)
                 state = next_state
 
+
+
                 if "final_info" in info:
                     for i, final_inf in enumerate(info["final_info"]):
                         if final_inf and "episode" in final_inf:
-                            self.ep_rewards_hist.append(final_inf["episode"]["r"].item())
-                            self.raw_rewards_hist.append(final_inf.get("episode_raw_reward", 0))
-                            self.attacks_hist.append(final_inf.get("attack_count", 0))
-                            self.misses_hist.append(final_inf.get("miss_count", 0))
+                            ep_reward = final_inf["episode"]["r"].item()
+                            ep_raw = final_inf.get("raw_reward", 0)
+                            ep_attacks = final_inf.get("attack_count", 0)
+                            ep_misses = final_inf.get("miss_count", 0)
                             
-                            # if writer:
-                            #     writer.add_scalar(f"Raw_Envs/Env_{i}_Reward", final_inf["episode"]["r"].item(), global_step) 
+                            self.ep_rewards_hist.append(ep_reward)
+                            
+                            if writer:
+                                writer.add_scalar(f"Env_{i}/Episode_Reward", ep_reward, global_step)
+                                writer.add_scalar(f"Env_{i}/Raw_Reward", ep_raw, global_step)
+                                writer.add_scalar(f"Env_{i}/Attacks", ep_attacks, global_step)
+                                writer.add_scalar(f"Env_{i}/Misses", ep_misses, global_step)
+                                
+                                #writer.add_histogram(f"Env_{i}/Reward_Distribution", ep_reward, global_step)
+
             if len(self.ep_rewards_hist) > 0:
                 avg_reward = np.mean(self.ep_rewards_hist)
-                avg_raw = np.mean(self.raw_rewards_hist)
-                avg_attacks = np.mean(self.attacks_hist)
-                avg_misses = np.mean(self.misses_hist)
                 
-                if writer:
-                    writer.add_scalar("Avg_Metrics(50)/Episode_Reward", avg_reward, global_step)
-                    writer.add_scalar("Avg_Metrics(50)/Raw_Reward", avg_raw, global_step)
-                    writer.add_scalar("Avg_Metrics(50)/Attacks", avg_attacks, global_step)
-                    writer.add_scalar("Avg_Metrics(50)/Misses", avg_misses, global_step)
-                
-                print(f"Update {update:3d} | Step {global_step:6d} | "
-                    f"AVG Score: {avg_reward:5.1f} | AVG Raw: {avg_raw:4.1f} | "
-                    f"Attacks: {avg_attacks:.1f} | Misses: {avg_misses:.1f}")
+                print(f"Update {update:3d} | Step {global_step:6d} | AVG Score (for save): {avg_reward:5.1f}")
                 
                 if save_best and avg_reward > best_score:
                     best_score = avg_reward
                     self.agent.save(checkpoint_path)
-            self.agent.train(writer=writer, ep=update, next_state=state, next_done=done)
+                    
+            self.agent.train(writer=writer, ep=update, next_state=state, done=done)
+            
         env.close()
 
     def make_test_env(self, render_mode: str| None = None):

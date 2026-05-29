@@ -41,6 +41,7 @@ class ChangeRewardWrapper(gym.Wrapper):
         self.miss_threshold = miss_threshold
         self.current_misses = 0
         self.base_bonus = base_bonus
+        self.episode_raw_reward = 0
         
     def step(self, action: np.ndarray):
         return self.step_binary(action) if self.action_wrapper == "binary" else self.step_discrete(action)
@@ -88,7 +89,7 @@ class ChangeRewardWrapper(gym.Wrapper):
         
         self.time_bonus = max(self.min_time_bonus, self.time_bonus * self.time_bonus_decay)
         self.prev_info = info
-        info["raw_reward"] = reward
+        info["raw_reward"] = self.episode_kills
         info['attack_count'] = self.attack_count
         info['miss_count'] = self.miss_count
         return state, new_reward, terminated, truncated, info
@@ -113,7 +114,7 @@ class ChangeRewardWrapper(gym.Wrapper):
             bonus += self.base_bonus
 
         if reward > 0:
-            self.episode_kills += 1
+            self.episode_kills += reward
             bonus += (self.kill_bonus + (self.episode_kills - 1) * self.extra_kill_bonus) * self.time_bonus
             self.time_bonus = 1.5
             self.current_misses = 0
@@ -133,7 +134,7 @@ class ChangeRewardWrapper(gym.Wrapper):
                 
         self.time_bonus = max(self.min_time_bonus, self.time_bonus * self.time_bonus_decay)
         self.prev_info = info
-        info["raw_reward"] = reward
+        info["raw_reward"] = self.episode_kills
         info["attack_count"] = self.attack_count
         info['miss_count'] = self.miss_count
 
