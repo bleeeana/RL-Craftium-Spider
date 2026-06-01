@@ -2,16 +2,16 @@ import gymnasium as gym
 import numpy as np
 
 class ChangeRewardWrapper(gym.Wrapper):
-    def __init__(self, env, attack_idx: int = 1, miss_penalty: float = -0.05,  
-                 afk_penalty: float = -0.01, kill_bonus: float = 4.5,
+    def __init__(self, env, attack_idx: int = 1, miss_penalty: float = 0.0,  
+                 afk_penalty: float = -0.02, kill_bonus: float = 3,
                  mouse_x_plus_idx: int = 5, mouse_x_minus_idx: int = 6,
                  mouse_y_plus_idx: int = 7, mouse_y_minus_idx: int = 8,
                  jitter_penalty: float = -0.02, action_wrapper: str = 'binary',
-                 still_steps_threshold: int = 15, extra_kill_bonus: int = 1.5,
+                 still_steps_threshold: int = 20, extra_kill_bonus: int = 1.5,
                  time_bonus: float = 1.5, min_time_bonus: float = 0.3, 
                  time_bonus_decay: float = 0.9995, death_penalty: float = -1.0,
-                 attack_bonus: float = 0.05, attack_bonus_decay: float = 1.0,
-                 min_attack_bonus: float = 0.003, miss_threshold: int = 8,
+                 attack_bonus: float = 0.00, attack_bonus_decay: float = 1.0,
+                 min_attack_bonus: float = 0.003, miss_threshold: int = 5,
                  base_bonus: float = 0.000):
         super(ChangeRewardWrapper, self).__init__(env)
         self.attack_idx = attack_idx
@@ -120,12 +120,16 @@ class ChangeRewardWrapper(gym.Wrapper):
             self.current_misses = 0
             
         if self.prev_info is not None:
-            if np.allclose(info["player_pos"], self.prev_info["player_pos"]):
+            current_pos = np.array(info["player_pos"])
+            prev_pos = np.array(self.prev_info["player_pos"])
+            dist = np.linalg.norm(current_pos - prev_pos)
+            
+            if dist < 0.06: 
                 self.still_count += 1
                 if self.still_count > self.still_steps_threshold:
                     bonus += self.afk_penalty
             else:
-                self.still_count = 0 
+                self.still_count = 0
 
         if terminated:
             bonus += self.death_penalty

@@ -46,7 +46,7 @@ class Memory:
                 next_non_terminal = 1.0 - last_dones
             else:
                 next_values = self.values[t + 1]
-                next_non_terminal = 1.0 - self.dones[t + 1]
+                next_non_terminal = 1.0 - self.dones[t]
                 
             delta = self.rewards[t] + gamma * next_values * next_non_terminal - self.values[t]
             last_gae = delta + gamma * gae_lambda * next_non_terminal * last_gae
@@ -57,7 +57,6 @@ class Memory:
         returns = returns.reshape(-1)
         advantages = advantages.reshape(-1)
         
-        returns = (returns - returns.mean()) / (returns.std() + 1e-8)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
         return advantages, returns
@@ -66,10 +65,10 @@ class PPOAgent:
     def __init__(self, action_size: int, lr: float = 2.5e-4,
                  gamma: float = 0.999, clip_ratio: float = 0.1, ppo_epochs: int = 4,
                  hidden_size: int = 512, layers_num: int = 0, action_wrapper: str = "binary",
-                 critic_loss_coeff: float = 0.5, update_period: int = 2048, frame_size: int = 4,
+                 critic_loss_coeff: float = 0.7, update_period: int = 2048, frame_size: int = 4,
                  feature_size: int = 256, channels_size: int = 3, batch_size: int = 256, 
-                 gae_lambda: float = 0.95, entropy_loss_coeff: float = 0.03, entropy_coeff_decay: float = 0.995,
-                 min_entropy: float = 0.00, use_scheduler: bool = True, updates: int = 4000,
+                 gae_lambda: float = 0.95, entropy_loss_coeff: float = 0.01, entropy_coeff_decay: float = 0.995,
+                 min_entropy: float = 0.001, use_scheduler: bool = False, updates: int = 4000,
                  target_kl : float = 0.015, num_envs: int = 4):
         self.gamma = gamma
         self.action_size = action_size
@@ -104,7 +103,7 @@ class PPOAgent:
         
     def ppo_loss(self, states_tensor: torch.Tensor, actions_tensor: torch.Tensor, 
                  advantages_tensor: torch.Tensor, returns_tensor: torch.Tensor, 
-                 old_log_probs_tensor: torch.Tensor) -> None:
+                 old_log_probs_tensor: torch.Tensor):
         features = self.encoder(states_tensor)
         logits = self.actor(features)
         if self.action_wrapper == "binary":
@@ -119,8 +118,8 @@ class PPOAgent:
         ratio_clipped = torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio)
         values = self.critic(features).squeeze(-1)
         
-        actor_loss = -torch.min(ratio * advantages_tensor, ratio_clipped * advantages_tensor).mean()
-        critic_loss = self.critic_loss_coeff * F.mse_loss(values, returns_tensor)
+        actor_loss = -torch.min(ratio * advantages_tensor, ratio_clipped * advantages_tensor).mean() 
+        critic_loss = self.critic_loss_coeff * F.smooth_l1_loss(values, returns_tensor)
         
         self.loss = actor_loss + critic_loss - self.entropy_loss_coeff * self.entropy
 
@@ -129,7 +128,7 @@ class PPOAgent:
             
         return distribution.probs, actor_loss, critic_loss, approx_kl
     
-    def act(self, state: np.ndarray | torch.Tensor) -> tuple[float, np.ndarray | int, float]:
+    def act(self, state: np.ndarray | torch.Tensor):
         with torch.no_grad():
             if not isinstance(state, torch.Tensor):
                 state = torch.as_tensor(np.asarray(state), dtype=torch.float32).to(self.actor.device)
@@ -171,12 +170,11 @@ class PPOAgent:
             for start in range(0,len(states_tensor), self.batch_size):
                 batch_idx = idx[start: start + self.batch_size]
                 
-                probs, actor_loss, critit_loss, approx_kl = self.ppo_loss(states_tensor[batch_idx], actions_tensor[batch_idx], advantages_tensor[batch_idx], returns_tensor[batch_idx], old_log_probs_tensor[batch_idx])
+                probs, actor_loss, critic_loss, approx_kl = self.ppo_loss(states_tensor[batch_idx], actions_tensor[batch_idx], advantages_tensor[batch_idx], returns_tensor[batch_idx], old_log_probs_tensor[batch_idx])
                 self.optimizer.zero_grad()
                 self.loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
-                torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
-                torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 0.5)
+                all_params = list(self.actor.parameters()) + list(self.critic.parameters()) + list(self.encoder.parameters())
+                torch.nn.utils.clip_grad_norm_(all_params, 0.5)
                 
                 self.optimizer.step()
 
@@ -193,7 +191,7 @@ class PPOAgent:
             writer.add_scalar("Log/Entropy", self.entropy, ep)
             writer.add_scalar("Log/loss", self.loss, ep)
             writer.add_scalar("Log/actor_loss", actor_loss, ep)
-            writer.add_scalar("Log/critic_loss", critit_loss, ep)
+            writer.add_scalar("Log/critic_loss", critic_loss, ep)
 
             writer.add_scalar("Log/Entropy_coeff", self.entropy_loss_coeff, ep)
             writer.add_histogram("Policy/probs", probs.detach().cpu(),ep)

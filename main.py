@@ -31,7 +31,7 @@ AGENT_ACTIONS = [
 ]
 
 class Solver:
-    def __init__(self, env_name:str = "Craftium/SpidersAttack-v0", updates: int = 4000, 
+    def __init__(self, env_name:str = "Craftium/SpidersAttack-v0", updates: int = 1500, 
                  env_type: str = "discrete", num_envs: int = 4):
         self.scores = []
         self.env_type = env_type
@@ -59,7 +59,8 @@ class Solver:
         kwargs = {
             "frameskip": 4,
             "fps_max": 200,
-            "mt_port": 49155 + env_idx
+            "mt_port": 49155 + env_idx,
+            "rgb_observations": True
         }
         if render_mode is not None:
             kwargs["render_mode"] = render_mode
@@ -112,7 +113,6 @@ class Solver:
         state, _ = env.reset()
         env_steps = self.agent.update_period // self.num_envs
         
-        # Оставляем только для того, чтобы адекватно сохранять best_model
         self.ep_rewards_hist = deque(maxlen=50)
 
         for update in range(self.updates):
@@ -126,10 +126,8 @@ class Solver:
                 next_state, reward, terminated, truncated, info = env.step(action)
                 done = np.logical_or(terminated, truncated)
                 
-                self.agent.memory.append_new(state, action, reward, value, log_prob, done)
+                self.agent.memory.append_new(state, action, reward * 0.1, value, log_prob, done)
                 state = next_state
-
-
 
                 if "final_info" in info:
                     for i, final_inf in enumerate(info["final_info"]):
@@ -220,10 +218,10 @@ class Solver:
             raw_reward_sum = 0
             step_count = 0            
             while True:
-                _, action, _ = self.agent.act(state)
-                if isinstance(action, np.ndarray):
-                    action = action.astype(int)
-                next_state, reward, terminated, truncated, info = env.step(action)
+                state_batch = np.expand_dims(np.array(state), 0)
+                _, action, _ = self.agent.act(state_batch)
+                env_action = action[0].astype(int) if self.env_type == "binary" else int(action[0])
+                next_state, reward, terminated, truncated, info = env.step(env_action)
                 raw_reward = info.get("raw_reward", 0)
                 raw_reward_sum += raw_reward
                 done = terminated or truncated
@@ -243,9 +241,9 @@ def main():
     exp_name = f"ppo_"
     writer = SummaryWriter(log_dir=f"runs/{datetime.now().strftime('%Y%m%d_%H%M%S')}/{exp_name}")
     solver = Solver(env_type="discrete")
-    solver.run(True, writer)
-    solver.fine_tune(save_best=True, writer=writer)
-    #solver.test(10,record=True,render=False,video_folder='videos')
+    #solver.run(True, writer)
+    #solver.fine_tune(save_best=True, writer=writer)
+    solver.test(10,record=True,render=False,video_folder='videos')
     
 if __name__ == "__main__":
     main()
