@@ -232,7 +232,7 @@ class Solver:
                     env.render()
                 if done:
                     break
-            
+            print(f"===Result in ep {ep}: {total_reward}===")
             self.scores.append(total_reward)
             raw_scores.append(raw_reward_sum) 
         env.close()
